@@ -28,9 +28,10 @@ __device__ void reduce(float * d_suma, float * sdata_suma, float * d_max, float 
 		if (tid < s) {
 			sdata_suma[tid] += sdata_suma[tid + s];
 			
-			int valor = sdata_max[tid + s];
-			if( sdata_max[tid] < valor)
-				sdata_max[tid] = valor;
+			float valor = max(sdata_max[tid + s],sdata_max[tid]);
+			sdata_max[tid] = valor;
+			/*if( sdata_max[tid] < valor)
+				sdata_max[tid] = valor;*/
 		}
 		
 		__syncthreads();
@@ -43,23 +44,37 @@ __device__ void reduce(float * d_suma, float * sdata_suma, float * d_max, float 
 	
 }
 
-__global__ void transformacionSinCompartida(float * A, float * B, float * C, int N) {
-	int i = threadIdx.x + blockDim.x * blockIdx.x;
+__global__ void transformacionSinCompartida(float * A, float * B, float * C, float * D_suma, float * D_max, int N) {
+	extern __shared__ float sdata[];
+	int tid = threadIdx.x;
+	int i = tid + blockDim.x * blockIdx.x;
 	if (i < N) {
-		int K = N / i;
-		int posInicio = K * blockDim.x;
+
+		float *sdata_suma = sdata;
+		float *sdata_max = sdata + blockDim.x;
+		
+
+		int posInicio = blockIdx.x * blockDim.x;
 		float suma = 0;
 		for (int j = 0; j < blockDim.x; j++) {
 			int posActual = posInicio + j;
 			float valorA = A[posActual] * i;
-			if ( ( (int)ceil(valorA) % 2) == 0) {
+			if ( (int)ceil(valorA) % 2 == 0) {
 				suma += valorA + B[posActual];
 			}
 			else {
 				suma += valorA - B[posActual];
 			}
 		}
+		
 		C[i] = suma;
+		sdata_suma[tid] = suma;
+		sdata_max[tid] = suma;
+		
+		__syncthreads();
+
+
+		reduce(D_suma, sdata_suma, D_max, sdata_max, tid, i);
 	}
 	
 }
@@ -87,30 +102,14 @@ __global__ void transformacionConCompartida(float * A, float * B, float * C, flo
 		
 		for (int j = 0; j < blockDim.x; j++) {
 			float valorA = sdata_A[j] * i;
-			if ( (int(ceil(valorA)) % 2) == 0) {
+			if ( (int)ceil(valorA) % 2 == 0) {
 				suma += valorA + sdata_B[j];
 			}
 			else {
 				suma += valorA - sdata_B[j];
 			}
 		}
-	/*int posInicio = blockIdx.x * blockDim.x;
-		float suma = 0;
-		
-		for (int j = 0; j < blockDim.x; j++) {
-		
-			
-			int posActual = posInicio + j;
-			float valorA = sdata_A[posActual] * i;
-			printf("hola");
-			if ( (int(ceil(valorA)) % 2) == 0) {
-				suma += valorA + *(sdata_B+posActual);
-			}
-			else {
-				suma += valorA - *(sdata_B+posActual);
-			}
-			
-		}*/
+
 		
 		C[i] = suma;
 		sdata_suma[tid] = suma;
@@ -154,8 +153,10 @@ int main(int argc, char *argv[]) {
 	float *B = new float[N];
 	float *C = new float[N];
 	float *D = new float[NBlocks];
-	float *D_suma = new float[blocksize];
-	float *D_max = new float[blocksize];
+	float *D_suma = new float[NBlocks];
+	float *D_max = new float[NBlocks];
+	float *D_suma_g = new float[NBlocks];
+	float *D_max_g = new float[NBlocks];
 
 	int devID;
 	cudaError_t err;
@@ -165,7 +166,7 @@ int main(int argc, char *argv[]) {
 	}
 	
 	int size = N * sizeof(float);
-	float * d_A = NULL, *d_B = NULL, *d_C = NULL, *d_suma = NULL, *d_max = NULL;
+	float * d_A = NULL, *d_B = NULL, *d_C = NULL, *d_suma = NULL, *d_max = NULL, *d_suma_g = NULL, *d_max_g = NULL;
 
 	err = cudaMalloc((void **)&d_A, size);
 	if (err != cudaSuccess) {
@@ -179,21 +180,30 @@ int main(int argc, char *argv[]) {
 
 	err = cudaMalloc((void **)&d_C, size);
 	if (err != cudaSuccess) {
-		cout << "ERROR RESERVA B" << endl;
+		cout << "ERROR RESERVA C" << endl;
 	}
 	err = cudaMalloc((void **)&d_suma, NBlocks*sizeof(float));
 	if (err != cudaSuccess) {
-		cout << "ERROR RESERVA B" << endl;
+		cout << "ERROR RESERVA suma compartida" << endl;
 	}
 	err = cudaMalloc((void **)&d_max, NBlocks*sizeof(float));
 	if (err != cudaSuccess) {
-		cout << "ERROR RESERVA B" << endl;
+		cout << "ERROR RESERVA maximo compartido" << endl;
 	}
+	err = cudaMalloc((void **)&d_suma_g, NBlocks * sizeof(float));
+	if (err != cudaSuccess) {
+		cout << "ERROR RESERVA suma glogal" << endl;
+	}
+	err = cudaMalloc((void **)&d_max_g, NBlocks * sizeof(float));
+	if (err != cudaSuccess) {
+		cout << "ERROR RESERVA max global" << endl;
+	}
+
 	
 	for (int i = 0; i < N; i++)
 	{
-		/*A[i] = i;
-		B[i] = i;*/
+		/*A[i] = 1;
+		B[i] = 2;*/
 		A[i] = (float)(1 - (i % 100)*0.001);
 		B[i] = (float)(0.5 + (i % 10) *0.1);
 	}
@@ -208,13 +218,12 @@ int main(int argc, char *argv[]) {
 		cout << "ERROR COPIA B" << endl;
 	}
 	
-	int threadsPerBlock = blocksize;
-	int blocksPerGrid = ceil((float)N/threadsPerBlock);
 
+//----------------------------------------Memoria compartida----------------------------------------------------------------
 	double  t1 = clock();
 
 	transformacionConCompartida << <NBlocks, blocksize, 4 * blocksize * sizeof(float) >> > (d_A, d_B, d_C, d_suma, d_max, N);
-	//transformacionConCompartida << <blocksPerGrid, threadsPerBlock>> > (d_A, d_B, d_C, N);
+	
 	err = cudaGetLastError();
 
 	if (err != cudaSuccess) {
@@ -222,20 +231,50 @@ int main(int argc, char *argv[]) {
 		exit(EXIT_FAILURE);
 	}
 	cudaMemcpy(D_max, d_max, NBlocks*sizeof(float), cudaMemcpyDeviceToHost);
-	cout <<"adfadf"<< endl;
+	
 	cudaMemcpy(D_suma, d_suma, NBlocks*sizeof(float), cudaMemcpyDeviceToHost);
 
 	cudaDeviceSynchronize();
 	
-	double mayor = D_max[0];
-	for (int k = 1; k < blocksize; k++)
+	float mayor = D_max[0];
+	for (int k = 1; k < NBlocks; k++) {
 		if (D_max[k] > mayor)
 			mayor = D_max[k];
-	cout << mayor << " este es el mayor" << endl;
-	double Tgpu = (clock() - t1) / CLOCKS_PER_SEC;
+	}
+	double TgpuCompartida = (clock() - t1) / CLOCKS_PER_SEC;
 
-	cout << "Tiempo gastado GPU " << Tgpu << endl << endl;
+	cout << "-----------------------GPU COMPARTIDA---------------------------------" << endl;
+	cout << "Tiempo gastado GPU compartida: " << TgpuCompartida << endl << endl;
+	cout << "El mayor es: " << mayor << endl;
+//----------------------------------------Memoria Global----------------------------------------------------------------
+	t1 = clock();
 
+	transformacionSinCompartida << <NBlocks, blocksize, 2 * blocksize * sizeof(float) >> > (d_A, d_B, d_C, d_suma_g, d_max_g, N);
+
+	err = cudaGetLastError();
+
+	if (err != cudaSuccess) {
+		fprintf(stderr, "Failed to launch kernel! ERROR= %d\n", err);
+		exit(EXIT_FAILURE);
+	}
+	cudaMemcpy(D_max_g, d_max_g, NBlocks * sizeof(float), cudaMemcpyDeviceToHost);
+
+	cudaMemcpy(D_suma_g, d_suma_g, NBlocks * sizeof(float), cudaMemcpyDeviceToHost);
+
+	cudaDeviceSynchronize();
+	
+	float mayor_global = D_max_g[0];
+	for (int k = 1; k < NBlocks; k++) {
+		if (D_max_g[k] > mayor_global) 
+			mayor_global = D_max_g[k];
+		
+	}
+	
+	double TgpuGlobal = (clock() - t1) / CLOCKS_PER_SEC;
+	cout << "-----------------------GPU GLOBAL---------------------------------" << endl;
+	cout << "Tiempo gastado GPU global: " << TgpuGlobal << endl << endl;
+	cout << "El mayor es: " << mayor_global << endl;
+//--------------------------------------------Secuencial----------------------------------------------------------------
 t1=clock();
 
   
@@ -259,15 +298,11 @@ for (int k=0; k<NBlocks;k++)
   }
 }
 
-  double t2=clock();
-  t2=(t2-t1)/CLOCKS_PER_SEC;
+  double TSecuencial = (clock() - t1) / CLOCKS_PER_SEC;
   
 
 
-//for (int i=0; i<N;i++)   cout<<"C["<<i<<"]="<<C[i]<<endl;
-cout<<"................................."<<endl;
-//for (int k=0; k<NBlocks;k++)    cout<<"D["<<k<<"]="<<D[k]<<endl;
-cout<<"................................."<<endl<<"El valor máximo en C es:  "<<mx<<endl;
-
-cout<<endl<<"N="<<N<<"= "<<blocksize<<"*"<<NBlocks<<"  ........  Tiempo gastado CPU= "<<t2<<endl<<endl;
+  cout << "--------------------------Secunencial---------------------------------" << endl;
+  cout << "Tiempo gastado Secuencial: " << TSecuencial << endl << endl;
+  cout << "El mayor es: " << mx << endl;
 }
