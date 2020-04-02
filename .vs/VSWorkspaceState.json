@@ -1,10 +1,12 @@
 {
   "ExpandedNodes": [
     "",
+    "\\ejercicio10",
+    "\\Ejercicio7",
     "\\practica1",
     "\\practica1\\floyd",
     "\\practica1\\operacionVectorial"
   ],
-  "SelectedNode": "\\practica1\\floyd\\Graph.cc",
+  "SelectedNode": "\\practica1\\operacionVectorial\\transformacion.cc",
   "PreviewInSolutionExplorer": false
 }
